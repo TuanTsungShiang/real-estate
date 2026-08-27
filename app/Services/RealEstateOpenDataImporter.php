@@ -26,6 +26,7 @@ class RealEstateOpenDataImporter
      */
     private const IDENTITY_FIELDS = [
         'transaction_type',
+        'city',
         'district',
         'address',
         'transaction_date_raw',
@@ -266,6 +267,7 @@ class RealEstateOpenDataImporter
             // content-based key instead.
             'row_hash' => $this->officialHash($row),
             'source_file' => $sourceFile,
+            'city' => $this->city($sourceFile),
             'transaction_type' => $this->pick($row, 'transaction_type'),
             'district' => $district,
             'address' => $address,
@@ -289,6 +291,17 @@ class RealEstateOpenDataImporter
         $payload['raw_payload'] = json_encode($row, JSON_UNESCAPED_UNICODE);
 
         return $payload;
+    }
+
+    /**
+     * The CSV carries no city column, so it comes from the county letter that
+     * prefixes the file name: a_lvr_land_a.csv -> 臺北市.
+     */
+    private function city(string $sourceFile): ?string
+    {
+        $code = strtolower(explode('_', $sourceFile, 2)[0]);
+
+        return config('real_estate.county_codes')[$code] ?? null;
     }
 
     /**

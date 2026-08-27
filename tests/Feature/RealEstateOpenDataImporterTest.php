@@ -51,7 +51,13 @@ class RealEstateOpenDataImporterTest extends TestCase
         // 鄉鎮市區 is the first column, so a surviving BOM would blank it out
         // and the whole row would have been skipped.
         $this->assertSame('大安區', $transaction->district);
+
+        // The CSV carries no city column; a_lvr_land_a.csv means 臺北市.
+        $this->assertSame('臺北市', $transaction->city);
+
         $this->assertSame('2024-03-15', $transaction->transaction_date->toDateString());
+        // Serialized as a plain date, not a UTC instant a day behind.
+        $this->assertSame('2024-03-15', $transaction->toArray()['transaction_date']);
         $this->assertSame(28500000, $transaction->total_price);
         $this->assertSame(1652893, $transaction->unit_price_ping);
         $this->assertTrue($transaction->has_elevator);

@@ -6,6 +6,7 @@ use App\Models\RealEstateTransaction;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\View\View;
 use Throwable;
 
@@ -25,15 +26,10 @@ class TransactionController extends Controller
             ->paginate($this->perPage($request))
             ->withQueryString();
 
-        $districts = RealEstateTransaction::query()
-            ->select('district')
-            ->distinct()
-            ->orderBy('district')
-            ->pluck('district');
-
         return view('transactions.index', [
             'transactions' => $transactions,
-            'districts' => $districts,
+            'cities' => $this->cities(),
+            'districts' => $this->districts($filters['city']),
             'filters' => $filters,
             'summary' => $this->summaryQuery($filters),
         ]);
@@ -56,6 +52,44 @@ class TransactionController extends Controller
         return response()->json($this->summaryQuery($this->filters($request)));
     }
 
+    /**
+     * Ordered north to south, following the county list in config, rather than
+     * by the byte order of the Chinese names.
+     *
+     * @return Collection<int, string>
+     */
+    private function cities(): Collection
+    {
+        $order = array_values(config('real_estate.county_codes'));
+
+        return RealEstateTransaction::query()
+            ->whereNotNull('city')
+            ->distinct()
+            ->pluck('city')
+            ->sortBy(function (string $city) use ($order) {
+                $position = array_search($city, $order, true);
+
+                return $position === false ? PHP_INT_MAX : $position;
+            })
+            ->values();
+    }
+
+    /**
+     * District names repeat across counties (中正區 is both 臺北市 and 基隆市),
+     * so narrow the list once a city is chosen.
+     *
+     * @return Collection<int, string>
+     */
+    private function districts(?string $city): Collection
+    {
+        return RealEstateTransaction::query()
+            ->when($city, fn ($query, string $city) => $query->where('city', $city))
+            ->select('district')
+            ->distinct()
+            ->orderBy('district')
+            ->pluck('district');
+    }
+
     private function perPage(Request $request): int
     {
         $perPage = (int) $request->integer('per_page', self::DEFAULT_PER_PAGE);
@@ -73,6 +107,7 @@ class TransactionController extends Controller
     private function filters(Request $request): array
     {
         return [
+            'city' => $request->string('city')->trim()->toString() ?: null,
             'district' => $request->string('district')->trim()->toString() ?: null,
             'keyword' => $request->string('keyword')->trim()->toString() ?: null,
             'building_type' => $request->string('building_type')->trim()->toString() ?: null,
@@ -119,11 +154,11 @@ class TransactionController extends Controller
             ->first();
 
         $districts = (clone $query)
-            ->select('district')
+            ->select('city', 'district')
             ->selectRaw('COUNT(*) as total_records')
             ->selectRaw('ROUND(AVG(unit_price_ping)) as avg_unit_price_ping')
             ->whereNotNull('unit_price_ping')
-            ->groupBy('district')
+            ->groupBy('city', 'district')
             ->orderByDesc('total_records')
             ->limit(12)
             ->get();

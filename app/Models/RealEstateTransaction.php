@@ -10,6 +10,7 @@ class RealEstateTransaction extends Model
     protected $fillable = [
         'row_hash',
         'source_file',
+        'city',
         'transaction_type',
         'district',
         'address',
@@ -31,7 +32,10 @@ class RealEstateTransaction extends Model
     ];
 
     protected $casts = [
-        'transaction_date' => 'date',
+        // Y-m-d, not the default full ISO timestamp: the column holds a date,
+        // and serializing it as a UTC instant shifted every Asia/Taipei date
+        // back by one day in the JSON API.
+        'transaction_date' => 'date:Y-m-d',
         'land_area_sqm' => 'decimal:2',
         'building_area_sqm' => 'decimal:2',
         'total_price' => 'integer',
@@ -58,6 +62,7 @@ class RealEstateTransaction extends Model
     public function scopeFiltered(Builder $query, array $filters): Builder
     {
         return $query
+            ->when($filters['city'] ?? null, fn (Builder $query, string $city) => $query->where('city', $city))
             ->when($filters['district'] ?? null, fn (Builder $query, string $district) => $query->where('district', $district))
             ->when($filters['keyword'] ?? null, fn (Builder $query, string $keyword) => $query->where('address', 'like', "%{$keyword}%"))
             ->when($filters['building_type'] ?? null, fn (Builder $query, string $type) => $query->where('building_type', 'like', "%{$type}%"))

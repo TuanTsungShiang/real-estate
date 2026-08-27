@@ -35,7 +35,7 @@
         }
         .toolbar {
             display: grid;
-            grid-template-columns: repeat(6, minmax(0, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
             gap: 12px;
             padding: 16px;
             margin: 22px 0 14px;
@@ -151,7 +151,6 @@
             font-size: 13px;
             color: #6b7280;
         }        @media (max-width: 900px) {
-            .toolbar,
             .stats {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
@@ -169,6 +168,15 @@
     </header>
 
     <form class="toolbar" method="get" action="{{ route('transactions.index') }}">
+        <div>
+            <label for="city">縣市</label>
+            <select id="city" name="city" onchange="this.form.district.value = ''; this.form.submit();">
+                <option value="">全部</option>
+                @foreach($cities as $city)
+                    <option value="{{ $city }}" @selected(($filters['city'] ?? null) === $city)>{{ $city }}</option>
+                @endforeach
+            </select>
+        </div>
         <div>
             <label for="district">行政區</label>
             <select id="district" name="district">
@@ -228,6 +236,7 @@
             <thead>
             <tr>
                 <th>交易日</th>
+                <th>縣市</th>
                 <th>行政區</th>
                 <th>地址</th>
                 <th>建物型態</th>
@@ -242,6 +251,7 @@
             @forelse($transactions as $transaction)
                 <tr>
                     <td>{{ optional($transaction->transaction_date)->format('Y-m-d') ?: '-' }}</td>
+                    <td>{{ $transaction->city ?: '-' }}</td>
                     <td>{{ $transaction->district }}</td>
                     <td class="address">{{ $transaction->address }}</td>
                     <td>{{ $transaction->building_type ?: '-' }}</td>
@@ -253,7 +263,7 @@
                 </tr>
             @empty
                 <tr>
-                    <td colspan="9" class="muted">目前沒有資料。先執行 php artisan real-estate:import --limit=1000。</td>
+                    <td colspan="10" class="muted">目前沒有資料。先執行 php artisan real-estate:import --limit=1000。</td>
                 </tr>
             @endforelse
             </tbody>

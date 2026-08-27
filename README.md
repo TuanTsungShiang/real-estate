@@ -101,6 +101,7 @@ Useful query parameters:
 
 | Parameter | Example |
 | --- | --- |
+| `city` | `臺北市` |
 | `district` | `大安區` |
 | `keyword` | `復興南路` |
 | `building_type` | `住宅大樓` |
@@ -113,8 +114,13 @@ Useful query parameters:
 Example:
 
 ```text
-/api/transactions?district=大安區&keyword=復興南路&per_page=30
+/api/transactions?city=臺北市&district=大安區&keyword=復興南路&per_page=30
 ```
+
+District names repeat across counties - `中正區` is both 臺北市 and 基隆市 - so
+filter on `district` alone only when you mean every county at once. The CSV has
+no city column; `city` is derived from the county letter that prefixes each
+source file, mapped in `config/real_estate.php`.
 
 ## Notes
 
