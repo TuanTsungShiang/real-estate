@@ -24,6 +24,9 @@ class RealEstateOpenDataImporter
      */
     private const EARLIEST_PLAUSIBLE_DATE = '2010-01-01';
 
+    /** Matches the unsignedSmallInteger the layout columns are stored in. */
+    private const MAX_LAYOUT_COUNT = 65535;
+
     /**
      * Fallback identity for rows with no 編號, hashed together with an
      * occurrence counter so two genuinely identical transactions still stay
@@ -362,9 +365,9 @@ class RealEstateOpenDataImporter
             'unit_price_sqm' => $unitPriceSqm,
             'unit_price_ping' => $unitPriceSqm ? (int) round($unitPriceSqm / self::PING_PER_SQM) : null,
             'parking_price' => $this->unsignedInteger($this->pick($row, 'parking_price')),
-            'room_count' => $this->unsignedInteger($this->pick($row, 'room_count')),
-            'hall_count' => $this->unsignedInteger($this->pick($row, 'hall_count')),
-            'bathroom_count' => $this->unsignedInteger($this->pick($row, 'bathroom_count')),
+            'room_count' => $this->layoutCount($this->pick($row, 'room_count')),
+            'hall_count' => $this->layoutCount($this->pick($row, 'hall_count')),
+            'bathroom_count' => $this->layoutCount($this->pick($row, 'bathroom_count')),
             'has_elevator' => $this->boolean($this->pick($row, 'has_elevator')),
         ];
 
@@ -480,6 +483,19 @@ class RealEstateOpenDataImporter
         $number = $this->integer($value);
 
         return $number === null || $number < 0 ? null : $number;
+    }
+
+    /**
+     * 建物現況格局 counts. A whole building sold as one record really does
+     * report a few hundred rooms, so the ceiling is generous - but 4444444
+     * bathrooms and 2123122122 rooms are somebody leaning on a key, not a
+     * building. Those become null; raw_payload keeps what the source said.
+     */
+    private function layoutCount(?string $value): ?int
+    {
+        $number = $this->unsignedInteger($value);
+
+        return $number === null || $number > self::MAX_LAYOUT_COUNT ? null : $number;
     }
 
     private function numberString(?string $value): ?string

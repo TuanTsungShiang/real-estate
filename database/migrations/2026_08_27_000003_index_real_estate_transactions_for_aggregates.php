@@ -25,9 +25,11 @@ return new class extends Migration
             // leaving total_price out of the trend index sent every grouped
             // query back to 2M+ rows in a multi-gigabyte table, which cost 174s
             // rather than 0.2s.
-            $table->index(['transaction_month', 'unit_price_ping', 'total_price']);
-            $table->index(['city', 'transaction_month', 'unit_price_ping', 'total_price']);
-            $table->index(['city', 'district', 'unit_price_ping']);
+            // Named explicitly: the generated names would be 76 and 81
+            // characters, past MySQL's 64 character limit for an index name.
+            $table->index(['transaction_month', 'unit_price_ping', 'total_price'], 'ret_month_unit_total_index');
+            $table->index(['city', 'transaction_month', 'unit_price_ping', 'total_price'], 'ret_city_month_unit_total_index');
+            $table->index(['city', 'district', 'unit_price_ping'], 'ret_city_district_unit_index');
             $table->index(['unit_price_ping', 'total_price']);
 
             // Keyword search is `like '%...%'`, and a leading wildcard cannot
@@ -41,9 +43,11 @@ return new class extends Migration
         });
 
         // Without stats the planner picks badly on a table this size.
-        if (DB::connection()->getDriverName() === 'sqlite') {
-            DB::statement('ANALYZE');
-        }
+        match (DB::connection()->getDriverName()) {
+            'sqlite' => DB::statement('ANALYZE'),
+            'mysql' => DB::statement('ANALYZE TABLE real_estate_transactions'),
+            default => null,
+        };
     }
 
     public function down(): void
@@ -54,9 +58,9 @@ return new class extends Migration
             $table->index(['city', 'district']);
             $table->index(['unit_price_ping']);
 
-            $table->dropIndex(['transaction_month', 'unit_price_ping', 'total_price']);
-            $table->dropIndex(['city', 'transaction_month', 'unit_price_ping', 'total_price']);
-            $table->dropIndex(['city', 'district', 'unit_price_ping']);
+            $table->dropIndex('ret_month_unit_total_index');
+            $table->dropIndex('ret_city_month_unit_total_index');
+            $table->dropIndex('ret_city_district_unit_index');
             $table->dropIndex(['unit_price_ping', 'total_price']);
 
             $table->dropColumn('transaction_month');

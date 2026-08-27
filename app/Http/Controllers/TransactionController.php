@@ -18,6 +18,9 @@ class TransactionController extends Controller
 
     private const MAX_PER_PAGE = 100;
 
+    /** Above this many priced rows, per-month lookups beat reading them all. */
+    private const MEDIAN_IN_MEMORY_ROWS = 200000;
+
 
 
     public function index(Request $request): View
@@ -113,53 +116,117 @@ class TransactionController extends Controller
             return collect();
         }
 
-        return $this->fillMonths($volume, $this->medianByMonth($base));
+        return $this->fillMonths(
+            $volume,
+            $this->medianByMonth($base, $volume->map(fn ($row) => (int) $row->priced_records)->all()),
+        );
     }
 
     /**
      * Median rather than mean: a single 4 億 luxury sale drags a month's average
      * far enough to flatten the whole line.
      *
-     * @return Collection<string, object>
+     * One indexed lookup per month rather than a window function. The
+     * (transaction_month, unit_price_ping, ...) indexes already hold the rows in
+     * exactly this order, so each month is a short range scan - and unlike
+     * ROW_NUMBER() this also runs on MySQL 5.7, which has no window functions.
+     *
+     * @param array<string, int> $pricedCounts priced rows per month
+     * @return array<string, int|null>
      */
-    private function medianByMonth(Builder $base): Collection
+    private function medianByMonth(Builder $base, array $pricedCounts): array
     {
-        // The (transaction_month, unit_price_ping) index already holds the rows
-        // in the partition order the window needs, so nothing has to be sorted.
-        $ranked = (clone $base)
-            ->whereNotNull('unit_price_ping')
-            ->select('transaction_month as month')
-            ->addSelect('unit_price_ping')
-            ->selectRaw('ROW_NUMBER() OVER (PARTITION BY transaction_month ORDER BY unit_price_ping) as rn')
-            ->selectRaw('COUNT(*) OVER (PARTITION BY transaction_month) as cnt');
+        $pricedCounts = array_filter($pricedCounts, fn (int $count) => $count > 0);
+        $total = array_sum($pricedCounts);
 
-        return DB::query()
-            ->fromSub($ranked, 'ranked')
-            ->select('month')
-            ->selectRaw('ROUND(AVG(unit_price_ping)) as median_unit_price_ping')
-            // The middle row, or the mean of the two middle rows when even.
-            ->whereRaw(sprintf('rn in (%s, %s)', $this->halveRounded('cnt + 1'), $this->halveRounded('cnt + 2')))
-            ->groupBy('month')
-            ->get()
-            ->keyBy('month');
+        if ($total === 0) {
+            return [];
+        }
+
+        // One query per month is cheap when the filter is index-served, but a
+        // filter the index cannot narrow - a fulltext address match, say - pays
+        // its cost on every one of them. Below this many rows it is cheaper to
+        // pay it once and pick the middles in PHP.
+        return $total <= self::MEDIAN_IN_MEMORY_ROWS
+            ? $this->mediansFromRows($base, $pricedCounts)
+            : $this->mediansByLookup($base, $pricedCounts);
     }
 
     /**
-     * Integer halving. SQLite and Postgres already truncate integer division;
-     * MySQL returns a decimal, and PHP's bundled SQLite has no FLOOR() to lean
-     * on, so each driver gets the form that works there.
+     * @param array<string, int> $pricedCounts
+     * @return array<string, int|null>
      */
+    private function mediansFromRows(Builder $base, array $pricedCounts): array
+    {
+        $values = [];
+
+        // chunkById, not chunk: paging over a non-unique order skips and
+        // repeats rows. The per-month sort happens here instead.
+        (clone $base)
+            ->whereNotNull('unit_price_ping')
+            ->select(['id', 'transaction_month', 'unit_price_ping'])
+            ->chunkById(50000, function ($rows) use (&$values): void {
+                foreach ($rows as $row) {
+                    $values[$row->transaction_month][] = (int) $row->unit_price_ping;
+                }
+            });
+
+        $medians = [];
+
+        foreach ($pricedCounts as $month => $count) {
+            if (! isset($values[$month])) {
+                $medians[$month] = null;
+
+                continue;
+            }
+
+            sort($values[$month]);
+            $medians[$month] = $this->middleOf($values[$month]);
+        }
+
+        return $medians;
+    }
+
+    /**
+     * @param array<string, int> $pricedCounts
+     * @return array<string, int|null>
+     */
+    private function mediansByLookup(Builder $base, array $pricedCounts): array
+    {
+        $medians = [];
+
+        foreach ($pricedCounts as $month => $count) {
+            $middle = (clone $base)
+                ->where('transaction_month', $month)
+                ->whereNotNull('unit_price_ping')
+                ->orderBy('unit_price_ping')
+                // The middle value, or both middle values when the count is even.
+                ->skip(intdiv($count - 1, 2))
+                ->take($count % 2 === 0 ? 2 : 1)
+                ->pluck('unit_price_ping');
+
+            $medians[$month] = $middle->isEmpty() ? null : (int) round($middle->avg());
+        }
+
+        return $medians;
+    }
+
+    /**
+     * @param array<int, int> $sorted ascending
+     */
+    private function middleOf(array $sorted): int
+    {
+        $count = count($sorted);
+        $at = intdiv($count - 1, 2);
+
+        return $count % 2 === 0
+            ? (int) round(($sorted[$at] + $sorted[$at + 1]) / 2)
+            : $sorted[$at];
+    }
+
     private function trendMonths(): int
     {
         return max(1, (int) config('real_estate.trend_months', 60));
-    }
-
-    private function halveRounded(string $expression): string
-    {
-        return match (DB::connection()->getDriverName()) {
-            'sqlite', 'pgsql' => "({$expression}) / 2",
-            default => "FLOOR(({$expression}) / 2)",
-        };
     }
 
     /**
@@ -167,10 +234,10 @@ class TransactionController extends Controller
      * axis rather than a list of months that happen to have rows.
      *
      * @param Collection<string, object> $volume
-     * @param Collection<string, object> $medians
+     * @param array<string, int|null> $medians
      * @return Collection<int, object>
      */
-    private function fillMonths(Collection $volume, Collection $medians): Collection
+    private function fillMonths(Collection $volume, array $medians): Collection
     {
         $cursor = Carbon::createFromFormat('Y-m', $volume->keys()->first())->startOfMonth();
         $end = Carbon::createFromFormat('Y-m', $volume->keys()->last())->startOfMonth();
@@ -194,7 +261,7 @@ class TransactionController extends Controller
                 'month' => $key,
                 'total_records' => (int) ($row->total_records ?? 0),
                 'priced_records' => (int) ($row->priced_records ?? 0),
-                'median_unit_price_ping' => $this->roundNullable($medians->get($key)?->median_unit_price_ping),
+                'median_unit_price_ping' => $medians[$key] ?? null,
                 'avg_unit_price_ping' => $this->roundNullable($row->avg_unit_price_ping ?? null),
                 'avg_total_price' => $this->roundNullable($row->avg_total_price ?? null),
             ]);
