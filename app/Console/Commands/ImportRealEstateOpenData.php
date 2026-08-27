@@ -37,8 +37,8 @@ class ImportRealEstateOpenData extends Command
         );
 
         $this->table(
-            ['CSV files', 'Imported', 'Skipped', 'Repeats'],
-            [[$result['files'], $result['imported'], $result['skipped'], $result['repeated']]],
+            ['CSV files', 'Imported', 'Skipped', 'Fallback keys'],
+            [[$result['files'], $result['imported'], $result['skipped'], $result['fallback']]],
         );
 
         return self::SUCCESS;

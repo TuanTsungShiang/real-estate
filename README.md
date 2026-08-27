@@ -68,16 +68,17 @@ Import from another URL:
 php artisan real-estate:import --url="https://example.com/data.zip"
 ```
 
-Imports are idempotent: each row carries a `row_hash` built from its identity
-fields plus how many times that identity has appeared in the run, so re-running
-an import updates known rows in place instead of duplicating the dataset, while
-two genuinely identical transactions still stay two rows. Use `--fresh` only
-when you want to start from an empty table.
+Imports are idempotent: `row_hash` is derived from the official `編號` that MOI
+stamps on every registered case, so re-running an import updates known rows in
+place, and two identical-looking transactions registered as separate cases stay
+two rows. Exports without a `編號` fall back to a hash of the row contents plus
+an occurrence counter. Use `--fresh` only when you want to start from an empty
+table.
 
-The summary table reports `Repeats` (rows sharing an identity with an earlier
-row in the same run - imported, just flagged) and `Skipped` (rows without a
-district, address or total price - the `_build`, `_land`, `_park` sub-files and
-the `c` rental files have no sale price and are expected to land here).
+The summary table reports `Fallback keys` (rows with no `編號`, expected to be 0
+for current exports) and `Skipped` (rows without a district, address or total
+price - the `_build`, `_land`, `_park` sub-files and the `c` rental files have
+no sale price and are expected to land here).
 
 ## Tests
 

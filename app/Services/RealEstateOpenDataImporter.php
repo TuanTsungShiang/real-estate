@@ -19,10 +19,10 @@ class RealEstateOpenDataImporter
     private const BATCH_SIZE = 500;
 
     /**
-     * Fields that identify a transaction. Hashed together with an occurrence
-     * counter to form `row_hash`, so two genuinely identical transactions in
-     * the same building stay two rows. Deliberately excludes source_file so
-     * re-downloads update in place.
+     * Fallback identity for rows with no 編號, hashed together with an
+     * occurrence counter so two genuinely identical transactions still stay
+     * two rows. Deliberately excludes source_file so re-downloads update in
+     * place.
      */
     private const IDENTITY_FIELDS = [
         'transaction_type',
@@ -41,6 +41,8 @@ class RealEstateOpenDataImporter
      * Keep aliases here so importer changes are isolated when the schema moves.
      */
     private const FIELD_ALIASES = [
+        // MOI's own case identifier, unique per registered transaction.
+        'serial' => ['編號'],
         'transaction_type' => ['交易標的'],
         'district' => ['鄉鎮市區'],
         'address' => ['土地位置建物門牌'],
@@ -75,7 +77,7 @@ class RealEstateOpenDataImporter
     }
 
     /**
-     * @return array{imported:int, skipped:int, repeated:int, files:int}
+     * @return array{imported:int, skipped:int, fallback:int, files:int}
      */
     public function importZip(string $zipPath, ?int $limit = null, bool $fresh = false): array
     {
@@ -103,16 +105,17 @@ class RealEstateOpenDataImporter
 
         $imported = 0;
         $skipped = 0;
-        $repeated = 0;
+        $fallback = 0;
         $files = 0;
 
         /** @var array<int, array<string, mixed>> $batch */
         $batch = [];
 
         /**
-         * Identity hash => times seen in this run. Numbering repeats rather
-         * than dropping them keeps identical-but-real transactions apart while
-         * still producing the same row_hash on a re-import.
+         * Fallback identity hash => times seen in this run, used only for rows
+         * with no 編號. Numbering repeats rather than dropping them keeps
+         * identical-but-real transactions apart while still producing the same
+         * row_hash on a re-import.
          *
          * @var array<string, int> $occurrences
          */
@@ -135,16 +138,16 @@ class RealEstateOpenDataImporter
                         continue;
                     }
 
-                    $identity = $this->identityHash($payload);
-                    $occurrence = $occurrences[$identity] = ($occurrences[$identity] ?? 0) + 1;
+                    // Rows normally key off 編號. Only pre-編號 or reshaped
+                    // exports fall through to the content-based identity, so
+                    // the occurrence map usually stays empty.
+                    if ($payload['row_hash'] === null) {
+                        $identity = $this->identityHash($payload);
+                        $occurrence = $occurrences[$identity] = ($occurrences[$identity] ?? 0) + 1;
 
-                    if ($occurrence > 1) {
-                        $repeated++;
+                        $payload['row_hash'] = sha1($identity.'#'.$occurrence);
+                        $fallback++;
                     }
-
-                    // Unique by construction, so a batch never touches the same
-                    // upsert conflict target twice (which SQLite rejects).
-                    $payload['row_hash'] = sha1($identity.'#'.$occurrence);
 
                     $batch[] = $payload;
                     $imported++;
@@ -161,7 +164,7 @@ class RealEstateOpenDataImporter
             File::deleteDirectory($extractPath);
         }
 
-        return compact('imported', 'skipped', 'repeated', 'files');
+        return compact('imported', 'skipped', 'fallback', 'files');
     }
 
     /**
@@ -259,6 +262,9 @@ class RealEstateOpenDataImporter
         $transactionDateRaw = $this->pick($row, 'transaction_date_raw');
 
         $payload = [
+            // Null when the export predates 編號; importZip then derives a
+            // content-based key instead.
+            'row_hash' => $this->officialHash($row),
             'source_file' => $sourceFile,
             'transaction_type' => $this->pick($row, 'transaction_type'),
             'district' => $district,
@@ -283,6 +289,19 @@ class RealEstateOpenDataImporter
         $payload['raw_payload'] = json_encode($row, JSON_UNESCAPED_UNICODE);
 
         return $payload;
+    }
+
+    /**
+     * MOI stamps every registered case with a unique 編號, so prefer it over
+     * anything we could derive from the row's contents.
+     *
+     * @param array<string, string|null> $row
+     */
+    private function officialHash(array $row): ?string
+    {
+        $serial = $this->pick($row, 'serial');
+
+        return $serial === null ? null : sha1('serial:'.$serial);
     }
 
     /**
