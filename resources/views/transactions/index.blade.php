@@ -124,6 +124,79 @@
             min-width: 260px;
             white-space: normal;
         }
+        /* Chart chrome. Kept as roles so the palette swaps in one place. */
+        .trend {
+            --surface: #fff;
+            --series-1: #2a78d6;
+            --grid: #e1e0d9;
+            --axis: #c3c2b7;
+            --tick: #898781;
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 18px;
+            margin: 14px 0;
+        }
+        .trend-head h2 {
+            margin: 0 0 4px;
+            font-size: 17px;
+        }
+        .trend-head p {
+            margin: 0;
+            font-size: 13px;
+        }
+        .trend-figure {
+            margin: 18px 0 0;
+        }
+        .trend-figure figcaption {
+            font-size: 12px;
+            font-weight: 700;
+            color: #4b5563;
+            margin-bottom: 2px;
+        }
+        .trend-figure figcaption .muted {
+            font-weight: 400;
+            margin-left: 6px;
+        }
+        .chart {
+            display: block;
+            width: 100%;
+            height: auto;
+            overflow: visible;
+        }
+        .chart .tick {
+            font-size: 11px;
+            fill: var(--tick);
+            font-variant-numeric: tabular-nums;
+        }
+        .chart .end-label {
+            font-size: 12px;
+            font-weight: 700;
+            fill: #1f2937;
+            font-variant-numeric: tabular-nums;
+        }
+        .trend-empty {
+            margin: 14px 0 0;
+            font-size: 13px;
+            color: #6b7280;
+            line-height: 1.7;
+        }
+        .trend-empty code {
+            background: #f3f4f6;
+            border-radius: 4px;
+            padding: 2px 6px;
+        }
+        .trend-table {
+            margin-top: 18px;
+            font-size: 13px;
+        }
+        .trend-table summary {
+            cursor: pointer;
+            color: #4b5563;
+        }
+        .trend-table .table-wrap {
+            margin-top: 10px;
+        }
         .pagination {
             margin-top: 16px;
         }
@@ -202,6 +275,14 @@
             <label for="max_total_price">最高總價</label>
             <input id="max_total_price" name="max_total_price" type="number" value="{{ $filters['max_total_price'] }}">
         </div>
+        <div>
+            <label for="date_from">交易日起</label>
+            <input id="date_from" name="date_from" type="date" value="{{ $filters['date_from'] }}">
+        </div>
+        <div>
+            <label for="date_to">交易日迄</label>
+            <input id="date_to" name="date_to" type="date" value="{{ $filters['date_to'] }}">
+        </div>
         <div class="actions">
             <button type="submit">查詢</button>
             <a class="button" href="{{ route('transactions.index') }}">清除</a>
@@ -230,6 +311,8 @@
             <strong>{{ $summary['max_unit_price_ping'] ? number_format($summary['max_unit_price_ping']) : '-' }}</strong>
         </div>
     </section>
+
+    @include('transactions._trend')
 
     <div class="table-wrap">
         <table>

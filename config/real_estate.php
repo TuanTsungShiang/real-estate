@@ -7,6 +7,23 @@ return [
     ),
 
     /*
+     * The default URL above only serves the current period, which is a few
+     * months of data - not enough to see a trend. This one serves a full past
+     * quarter, keyed by ROC year and quarter (114S1 = 2025 Q1).
+     */
+    'season_url' => env(
+        'REAL_ESTATE_SEASON_URL',
+        'https://plvr.land.moi.gov.tw/DownloadSeason?season={season}&fileName=lvr_landcsv.zip&type=zip'
+    ),
+
+    /*
+     * A month with one or two sales has a meaningless median, and plotting it
+     * makes the trend line jump. Below this many priced sales the chart breaks
+     * the price line and shows volume only.
+     */
+    'trend_min_sample' => 5,
+
+    /*
      * MOI splits the open data into one file per county, named by the county
      * letter code (a_lvr_land_a.csv -> 臺北市). The 鄉鎮市區 column only holds
      * the district, and district names repeat across counties (中正區 exists in

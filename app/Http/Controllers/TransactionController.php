@@ -3,10 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Models\RealEstateTransaction;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\View\View;
 use Throwable;
 
@@ -15,6 +17,8 @@ class TransactionController extends Controller
     private const DEFAULT_PER_PAGE = 30;
 
     private const MAX_PER_PAGE = 100;
+
+    private const MAX_TREND_MONTHS = 600;
 
     public function index(Request $request): View
     {
@@ -32,6 +36,7 @@ class TransactionController extends Controller
             'districts' => $this->districts($filters['city']),
             'filters' => $filters,
             'summary' => $this->summaryQuery($filters),
+            'trend' => $this->trendQuery($filters),
         ]);
     }
 
@@ -50,6 +55,143 @@ class TransactionController extends Controller
     public function summary(Request $request): JsonResponse
     {
         return response()->json($this->summaryQuery($this->filters($request)));
+    }
+
+    public function trend(Request $request): JsonResponse
+    {
+        return response()->json([
+            'months' => $this->trendQuery($this->filters($request)),
+        ]);
+    }
+
+    /**
+     * Monthly volume and average price for whatever the current filters select,
+     * which is what turns a district or a street into a trend line.
+     *
+     * @param array<string, mixed> $filters
+     * @return Collection<int, object>
+     */
+    private function trendQuery(array $filters): Collection
+    {
+        $month = $this->monthExpression();
+
+        $base = RealEstateTransaction::query()
+            ->filtered($filters)
+            ->whereNotNull('transaction_date');
+
+        $volume = (clone $base)
+            ->selectRaw("{$month} as month")
+            ->selectRaw('COUNT(*) as total_records')
+            // COUNT of a column skips nulls, so land rows with no unit price
+            // still count toward volume but not toward the price series.
+            ->selectRaw('COUNT(unit_price_ping) as priced_records')
+            ->selectRaw('ROUND(AVG(unit_price_ping)) as avg_unit_price_ping')
+            ->selectRaw('ROUND(AVG(total_price)) as avg_total_price')
+            ->groupBy('month')
+            ->orderBy('month')
+            ->get()
+            ->keyBy('month');
+
+        if ($volume->isEmpty()) {
+            return collect();
+        }
+
+        return $this->fillMonths($volume, $this->medianByMonth($base, $month));
+    }
+
+    /**
+     * Median rather than mean: a single 4 億 luxury sale drags a month's average
+     * far enough to flatten the whole line.
+     *
+     * @return Collection<string, object>
+     */
+    private function medianByMonth(Builder $base, string $month): Collection
+    {
+        $ranked = (clone $base)
+            ->whereNotNull('unit_price_ping')
+            ->selectRaw("{$month} as month")
+            ->selectRaw('unit_price_ping')
+            ->selectRaw("ROW_NUMBER() OVER (PARTITION BY {$month} ORDER BY unit_price_ping) as rn")
+            ->selectRaw("COUNT(*) OVER (PARTITION BY {$month}) as cnt");
+
+        return DB::query()
+            ->fromSub($ranked, 'ranked')
+            ->select('month')
+            ->selectRaw('ROUND(AVG(unit_price_ping)) as median_unit_price_ping')
+            // The middle row, or the mean of the two middle rows when even.
+            ->whereRaw(sprintf('rn in (%s, %s)', $this->halveRounded('cnt + 1'), $this->halveRounded('cnt + 2')))
+            ->groupBy('month')
+            ->get()
+            ->keyBy('month');
+    }
+
+    /**
+     * Integer halving. SQLite and Postgres already truncate integer division;
+     * MySQL returns a decimal, and PHP's bundled SQLite has no FLOOR() to lean
+     * on, so each driver gets the form that works there.
+     */
+    private function halveRounded(string $expression): string
+    {
+        return match (DB::connection()->getDriverName()) {
+            'sqlite', 'pgsql' => "({$expression}) / 2",
+            default => "FLOOR(({$expression}) / 2)",
+        };
+    }
+
+    /**
+     * Emit every month between the first and the last, so the x axis is a time
+     * axis rather than a list of months that happen to have rows.
+     *
+     * @param Collection<string, object> $volume
+     * @param Collection<string, object> $medians
+     * @return Collection<int, object>
+     */
+    private function fillMonths(Collection $volume, Collection $medians): Collection
+    {
+        $cursor = Carbon::createFromFormat('Y-m', $volume->keys()->first())->startOfMonth();
+        $end = Carbon::createFromFormat('Y-m', $volume->keys()->last())->startOfMonth();
+
+        // Anchor the window to the newest month, not the oldest: one row with a
+        // mistyped year would otherwise consume the whole cap and push every
+        // real month out of the series.
+        $earliest = (clone $end)->subMonths(self::MAX_TREND_MONTHS - 1);
+
+        if ($cursor < $earliest) {
+            $cursor = $earliest;
+        }
+
+        $months = collect();
+
+        while ($cursor <= $end) {
+            $key = $cursor->format('Y-m');
+            $row = $volume->get($key);
+
+            $months->push((object) [
+                'month' => $key,
+                'total_records' => (int) ($row->total_records ?? 0),
+                'priced_records' => (int) ($row->priced_records ?? 0),
+                'median_unit_price_ping' => $this->roundNullable($medians->get($key)?->median_unit_price_ping),
+                'avg_unit_price_ping' => $this->roundNullable($row->avg_unit_price_ping ?? null),
+                'avg_total_price' => $this->roundNullable($row->avg_total_price ?? null),
+            ]);
+
+            $cursor->addMonth();
+        }
+
+        return $months;
+    }
+
+    /**
+     * No portable SQL for "year and month", so pick per driver.
+     */
+    private function monthExpression(): string
+    {
+        return match (DB::connection()->getDriverName()) {
+            'sqlite' => "strftime('%Y-%m', transaction_date)",
+            'pgsql' => "to_char(transaction_date, 'YYYY-MM')",
+            'sqlsrv' => "FORMAT(transaction_date, 'yyyy-MM')",
+            default => "DATE_FORMAT(transaction_date, '%Y-%m')",
+        };
     }
 
     /**

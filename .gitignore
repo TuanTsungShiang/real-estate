@@ -10,6 +10,9 @@
 /storage/logs/*.log
 /bootstrap/cache/*.php
 /database/*.sqlite
+/database/*.sqlite-journal
+/database/*.sqlite-wal
+/database/*.sqlite-shm
 /.phpunit.result.cache
 /real-estate-mvp.zip
 /.phpunit.cache

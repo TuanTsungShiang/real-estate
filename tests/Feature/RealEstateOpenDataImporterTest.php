@@ -6,6 +6,7 @@ use App\Models\RealEstateTransaction;
 use App\Services\RealEstateOpenDataImporter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\File;
+use RuntimeException;
 use Tests\TestCase;
 use ZipArchive;
 
@@ -128,13 +129,83 @@ class RealEstateOpenDataImporterTest extends TestCase
 
     public function test_it_cleans_up_the_extracted_files(): void
     {
+        // Compare against what was already there rather than asserting the
+        // shared directory is empty - a real import may be running alongside.
+        $before = $this->extractedDirectories();
+
         $this->importer()->importZip($this->fixtureZip());
 
+        $this->assertSame(
+            [],
+            array_values(array_diff($this->extractedDirectories(), $before)),
+            'Extracted CSV files were left behind.',
+        );
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function extractedDirectories(): array
+    {
         $extracted = storage_path('app/real-estate/extracted');
 
-        $this->assertTrue(
-            ! File::isDirectory($extracted) || File::directories($extracted) === [],
-            'Extracted CSV files were left behind.',
+        return File::isDirectory($extracted) ? File::directories($extracted) : [];
+    }
+
+    public function test_it_expands_season_arguments(): void
+    {
+        $this->assertSame(['114S1'], RealEstateOpenDataImporter::expandSeasons(['114S1']));
+        $this->assertSame(['114S1', '114S2'], RealEstateOpenDataImporter::expandSeasons(['114S1,114S2']));
+        $this->assertSame(
+            ['113S4', '114S1', '114S2', '114S3'],
+            RealEstateOpenDataImporter::expandSeasons(['113S4-114S3']),
+        );
+
+        // A backwards range still reads left to right.
+        $this->assertSame(
+            ['114S3', '114S4', '115S1'],
+            RealEstateOpenDataImporter::expandSeasons(['115S1-114S3']),
+        );
+
+        // Duplicates across arguments collapse.
+        $this->assertSame(
+            ['114S1', '114S2'],
+            RealEstateOpenDataImporter::expandSeasons(['114S1-114S2', '114S2']),
+        );
+    }
+
+    public function test_it_rejects_a_malformed_season(): void
+    {
+        $this->expectException(RuntimeException::class);
+
+        RealEstateOpenDataImporter::expandSeasons(['114Q1']);
+    }
+
+    public function test_an_implausible_transaction_date_is_not_treated_as_a_date(): void
+    {
+        // 1100210 with a dropped digit parses cleanly as 民國11年 - 1922.
+        $this->importer()->importZip($this->fixtureZip(transactionDate: '110210'));
+
+        $transaction = RealEstateTransaction::query()
+            ->where('address', 'like', '%復興南路%')
+            ->orderBy('id')
+            ->firstOrFail();
+
+        $this->assertNull($transaction->transaction_date);
+        // Nothing is lost - the original value is still on the row.
+        $this->assertSame('110210', $transaction->transaction_date_raw);
+        $this->assertSame('110210', $transaction->raw_payload['交易年月日']);
+    }
+
+    public function test_a_future_transaction_date_is_not_treated_as_a_date(): void
+    {
+        $future = now()->addYear();
+        $roc = ($future->year - 1911).$future->format('md');
+
+        $this->importer()->importZip($this->fixtureZip(transactionDate: $roc));
+
+        $this->assertNull(
+            RealEstateTransaction::query()->where('address', 'like', '%復興南路%')->first()->transaction_date,
         );
     }
 
@@ -149,8 +220,9 @@ class RealEstateOpenDataImporterTest extends TestCase
      * 編號, and an unusable row.
      *
      * @param bool $withSerial drop the 編號 column to exercise the fallback key
+     * @param string $transactionDate override the ROC 交易年月日 value
      */
-    private function fixtureZip(bool $withSerial = true): string
+    private function fixtureZip(bool $withSerial = true, string $transactionDate = '1130315'): string
     {
         $headers = [
             '鄉鎮市區', '交易標的', '土地位置建物門牌', '土地移轉總面積平方公尺', '交易年月日',
@@ -160,7 +232,7 @@ class RealEstateOpenDataImporterTest extends TestCase
 
         $english = 'The villages and towns urban district,transaction sign,land sector position building sector house number plate,land shifting total area square meter,transaction year month and day,building state,main use,building shifting total area,building present situation pattern - room,building present situation pattern - hall,building present situation pattern - health,elevator,total price NTD,the unit price (NTD / square meter),the berth total price NTD';
 
-        $row = '大安區,房地(土地+建物),臺北市大安區復興南路一段100號,15.32,1130315,住宅大樓(11層含以上有電梯),住家用,102.55,3,2,2,有,28500000,500000,0';
+        $row = "大安區,房地(土地+建物),臺北市大安區復興南路一段100號,15.32,{$transactionDate},住宅大樓(11層含以上有電梯),住家用,102.55,3,2,2,有,28500000,500000,0";
         $other = '信義區,房地(土地+建物),臺北市信義區松高路50號,20.10,1130520,華廈(10層含以下有電梯),住家用,88.20,2,1,1,有,19800000,420000,0';
         $noPrice = '中山區,房地(土地+建物),臺北市中山區南京東路一段9號,10.00,1130101,公寓(5樓含以下無電梯),住家用,66.00,2,1,1,無,,,0';
 

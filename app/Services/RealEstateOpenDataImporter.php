@@ -19,6 +19,12 @@ class RealEstateOpenDataImporter
     private const BATCH_SIZE = 500;
 
     /**
+     * Real-price registration began in August 2012; anything earlier is a
+     * mistyped ROC year, not a transaction.
+     */
+    private const EARLIEST_PLAUSIBLE_DATE = '2010-01-01';
+
+    /**
      * Fallback identity for rows with no 編號, hashed together with an
      * occurrence counter so two genuinely identical transactions still stay
      * two rows. Deliberately excludes source_file so re-downloads update in
@@ -61,9 +67,79 @@ class RealEstateOpenDataImporter
         'has_elevator' => ['電梯'],
     ];
 
-    public function download(string $url): string
+    /**
+     * Expand season arguments into a sorted list of labels. Accepts single
+     * seasons, comma separated lists and `113S1-115S2` ranges.
+     *
+     * @param array<int, string> $inputs
+     * @return array<int, string>
+     */
+    public static function expandSeasons(array $inputs): array
     {
-        $target = storage_path('app/real-estate/source/lvr_landcsv.zip');
+        $indexes = [];
+
+        foreach ($inputs as $input) {
+            foreach (explode(',', $input) as $part) {
+                $part = trim($part);
+
+                if ($part === '') {
+                    continue;
+                }
+
+                if (str_contains($part, '-')) {
+                    [$from, $to] = array_map('trim', explode('-', $part, 2));
+                    $start = self::seasonIndex($from);
+                    $end = self::seasonIndex($to);
+
+                    if ($start > $end) {
+                        [$start, $end] = [$end, $start];
+                    }
+
+                    $indexes = array_merge($indexes, range($start, $end));
+
+                    continue;
+                }
+
+                $indexes[] = self::seasonIndex($part);
+            }
+        }
+
+        $indexes = array_unique($indexes);
+        sort($indexes);
+
+        return array_map(self::seasonLabel(...), $indexes);
+    }
+
+    private static function seasonIndex(string $season): int
+    {
+        if (! preg_match('/^(\d{3})S([1-4])$/i', trim($season), $matches)) {
+            throw new RuntimeException(
+                "Invalid season '{$season}'. Use a ROC year and quarter such as 114S1, or a range such as 113S1-115S2."
+            );
+        }
+
+        return ((int) $matches[1]) * 4 + ((int) $matches[2]) - 1;
+    }
+
+    private static function seasonLabel(int $index): string
+    {
+        return intdiv($index, 4).'S'.($index % 4 + 1);
+    }
+
+    public function downloadSeason(string $season): string
+    {
+        $season = self::expandSeasons([$season])[0];
+
+        return $this->download(
+            str_replace('{season}', $season, config('real_estate.season_url')),
+            $season,
+        );
+    }
+
+    public function download(string $url, ?string $label = null): string
+    {
+        $name = $label === null ? 'lvr_landcsv.zip' : "{$label}_lvr_landcsv.zip";
+        $target = storage_path('app/real-estate/source/'.$name);
         File::ensureDirectoryExists(dirname($target));
 
         $response = Http::timeout(120)->retry(3, 1000)->get($url);
@@ -80,7 +156,7 @@ class RealEstateOpenDataImporter
     /**
      * @return array{imported:int, skipped:int, fallback:int, files:int}
      */
-    public function importZip(string $zipPath, ?int $limit = null, bool $fresh = false): array
+    public function importZip(string $zipPath, ?int $limit = null, bool $fresh = false, ?string $season = null): array
     {
         if (! is_file($zipPath)) {
             throw new RuntimeException("ZIP file not found: {$zipPath}");
@@ -131,7 +207,7 @@ class RealEstateOpenDataImporter
                         break 2;
                     }
 
-                    $payload = $this->normalizeRow($row, basename($csvFile));
+                    $payload = $this->normalizeRow($row, basename($csvFile), $season);
 
                     if ($payload === null) {
                         $skipped++;
@@ -249,7 +325,7 @@ class RealEstateOpenDataImporter
      * @param array<string, string|null> $row
      * @return array<string, mixed>|null
      */
-    private function normalizeRow(array $row, string $sourceFile): ?array
+    private function normalizeRow(array $row, string $sourceFile, ?string $season = null): ?array
     {
         $district = $this->pick($row, 'district');
         $address = $this->pick($row, 'address');
@@ -267,6 +343,7 @@ class RealEstateOpenDataImporter
             // content-based key instead.
             'row_hash' => $this->officialHash($row),
             'source_file' => $sourceFile,
+            'season' => $season,
             'city' => $this->city($sourceFile),
             'transaction_type' => $this->pick($row, 'transaction_type'),
             'district' => $district,
@@ -363,7 +440,17 @@ class RealEstateOpenDataImporter
             return null;
         }
 
-        return sprintf('%04d-%02d-%02d', $year, $month, $day);
+        $date = sprintf('%04d-%02d-%02d', $year, $month, $day);
+
+        // A dropped digit turns 1100210 into 110210, which parses cleanly as
+        // 民國11年 - 1922, decades before the registry existed. A contract dated
+        // in the future is the same kind of typo. Both are kept in
+        // transaction_date_raw and raw_payload, just not treated as dates.
+        if ($date < self::EARLIEST_PLAUSIBLE_DATE || $date > now()->toDateString()) {
+            return null;
+        }
+
+        return $date;
     }
 
     private function decimal(?string $value): ?float

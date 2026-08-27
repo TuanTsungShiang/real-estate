@@ -10,6 +10,7 @@ class RealEstateTransaction extends Model
     protected $fillable = [
         'row_hash',
         'source_file',
+        'season',
         'city',
         'transaction_type',
         'district',
