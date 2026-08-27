@@ -118,7 +118,7 @@ class TransactionController extends Controller
 
         return $this->fillMonths(
             $volume,
-            $this->medianByMonth($base, $volume->map(fn ($row) => (int) $row->priced_records)->all()),
+            $this->medianByMonth($base, $volume->map(fn ($row) => (int) $row->priced_records)->all(), $filters),
         );
     }
 
@@ -134,7 +134,7 @@ class TransactionController extends Controller
      * @param array<string, int> $pricedCounts priced rows per month
      * @return array<string, int|null>
      */
-    private function medianByMonth(Builder $base, array $pricedCounts): array
+    private function medianByMonth(Builder $base, array $pricedCounts, array $filters): array
     {
         $pricedCounts = array_filter($pricedCounts, fn (int $count) => $count > 0);
         $total = array_sum($pricedCounts);
@@ -143,11 +143,15 @@ class TransactionController extends Controller
             return [];
         }
 
-        // One query per month is cheap when the filter is index-served, but a
-        // filter the index cannot narrow - a fulltext address match, say - pays
-        // its cost on every one of them. Below this many rows it is cheaper to
-        // pay it once and pick the middles in PHP.
-        return $total <= self::MEDIAN_IN_MEMORY_ROWS
+        // One indexed lookup per month is the cheaper option almost always -
+        // sixty of them run in well under a second. Reading every row instead
+        // only wins when the filter itself is expensive to re-evaluate, which
+        // here means an address match: no index narrows it, so each lookup
+        // pays for it again. Size alone is the wrong test - 117k rows of
+        // city + building_type were far slower to read than to look up.
+        $expensiveFilter = ($filters['keyword'] ?? null) !== null;
+
+        return $expensiveFilter && $total <= self::MEDIAN_IN_MEMORY_ROWS
             ? $this->mediansFromRows($base, $pricedCounts)
             : $this->mediansByLookup($base, $pricedCounts);
     }
@@ -160,10 +164,13 @@ class TransactionController extends Controller
     {
         $values = [];
 
-        // chunkById, not chunk: paging over a non-unique order skips and
-        // repeats rows. The per-month sort happens here instead.
+        // toBase() so the rows stay plain objects - hydrating a model per row
+        // costs more than the query. chunkById, not chunk: paging over a
+        // non-unique order skips and repeats rows, so the per-month sort
+        // happens below instead of in SQL.
         (clone $base)
             ->whereNotNull('unit_price_ping')
+            ->toBase()
             ->select(['id', 'transaction_month', 'unit_price_ping'])
             ->chunkById(50000, function ($rows) use (&$values): void {
                 foreach ($rows as $row) {
@@ -371,6 +378,9 @@ class TransactionController extends Controller
             ->selectRaw('AVG(unit_price_ping) as avg_unit_price_ping')
             ->selectRaw('MIN(unit_price_ping) as min_unit_price_ping')
             ->selectRaw('MAX(unit_price_ping) as max_unit_price_ping')
+            // In the same pass; as separate queries these were two more scans.
+            ->selectRaw('MIN(transaction_date) as oldest_transaction_date')
+            ->selectRaw('MAX(transaction_date) as latest_transaction_date')
             ->first();
 
         return [
@@ -379,8 +389,8 @@ class TransactionController extends Controller
             'avg_unit_price_ping' => $this->roundNullable($aggregate->avg_unit_price_ping ?? null),
             'min_unit_price_ping' => $this->roundNullable($aggregate->min_unit_price_ping ?? null),
             'max_unit_price_ping' => $this->roundNullable($aggregate->max_unit_price_ping ?? null),
-            'latest_transaction_date' => (clone $query)->max('transaction_date'),
-            'oldest_transaction_date' => (clone $query)->min('transaction_date'),
+            'latest_transaction_date' => $aggregate->latest_transaction_date ?? null,
+            'oldest_transaction_date' => $aggregate->oldest_transaction_date ?? null,
         ];
     }
 
