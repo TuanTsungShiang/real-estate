@@ -3,10 +3,6 @@
     // two y axes: the alignment of two scales would invent a correlation.
     $months = $trend->values();
 
-    if ($months->count() > 60) {
-        $months = $months->slice(-60)->values();
-    }
-
     $n = $months->count();
 
     $W = 960;
@@ -34,6 +30,7 @@
     };
 
     $minSample = (int) config('real_estate.trend_min_sample', 5);
+    $trendMonths = max(1, (int) config('real_estate.trend_months', 60));
 
     // A month with a couple of sales has a meaningless median, so show its
     // volume but leave a gap in the price line rather than a spike.
@@ -111,8 +108,8 @@
                 目前的篩選條件沒有可用的交易日期。
             @else
                 依目前篩選條件，{{ $months->first()->month }} ～ {{ $months->last()->month }}，共 {{ $n }} 個月
-                @if($trend->count() > $n)
-                    （僅顯示最近 60 個月）
+                @if($n >= $trendMonths)
+                    （走勢最多顯示最近 {{ $trendMonths }} 個月，要看更早的請用交易日篩選）
                 @endif
             @endif
         </p>

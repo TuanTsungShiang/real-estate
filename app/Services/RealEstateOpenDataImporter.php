@@ -337,6 +337,7 @@ class RealEstateOpenDataImporter
 
         $unitPriceSqm = $this->unsignedInteger($this->pick($row, 'unit_price_sqm'));
         $transactionDateRaw = $this->pick($row, 'transaction_date_raw');
+        $transactionDate = $this->rocDate($transactionDateRaw);
 
         $payload = [
             // Null when the export predates 編號; importZip then derives a
@@ -348,7 +349,10 @@ class RealEstateOpenDataImporter
             'transaction_type' => $this->pick($row, 'transaction_type'),
             'district' => $district,
             'address' => $address,
-            'transaction_date' => $this->rocDate($transactionDateRaw),
+            'transaction_date' => $transactionDate,
+            // Denormalised so trend queries group on an indexed column instead
+            // of a date function.
+            'transaction_month' => $transactionDate === null ? null : substr($transactionDate, 0, 7),
             'transaction_date_raw' => $transactionDateRaw,
             'building_type' => $this->pick($row, 'building_type'),
             'main_use' => $this->pick($row, 'main_use'),

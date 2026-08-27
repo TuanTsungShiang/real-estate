@@ -18,7 +18,7 @@ class TransactionController extends Controller
 
     private const MAX_PER_PAGE = 100;
 
-    private const MAX_TREND_MONTHS = 600;
+
 
     public function index(Request $request): View
     {
@@ -54,7 +54,11 @@ class TransactionController extends Controller
 
     public function summary(Request $request): JsonResponse
     {
-        return response()->json($this->summaryQuery($this->filters($request)));
+        $filters = $this->filters($request);
+
+        return response()->json($this->summaryQuery($filters) + [
+            'districts' => $this->districtBreakdown($filters),
+        ]);
     }
 
     public function trend(Request $request): JsonResponse
@@ -73,22 +77,35 @@ class TransactionController extends Controller
      */
     private function trendQuery(array $filters): Collection
     {
-        $month = $this->monthExpression();
-
         $base = RealEstateTransaction::query()
             ->filtered($filters)
-            ->whereNotNull('transaction_date');
+            ->whereNotNull('transaction_month');
+
+        // The chart and the table both stop at MAX_TREND_MONTHS, so there is no
+        // point aggregating - or running a window function over - every month
+        // back to 2010 just to throw the result away.
+        $latest = (clone $base)->max('transaction_month');
+
+        if ($latest === null) {
+            return collect();
+        }
+
+        $base->where(
+            'transaction_month',
+            '>=',
+            Carbon::createFromFormat('Y-m', $latest)->startOfMonth()->subMonths($this->trendMonths() - 1)->format('Y-m'),
+        );
 
         $volume = (clone $base)
-            ->selectRaw("{$month} as month")
+            ->select('transaction_month as month')
             ->selectRaw('COUNT(*) as total_records')
             // COUNT of a column skips nulls, so land rows with no unit price
             // still count toward volume but not toward the price series.
             ->selectRaw('COUNT(unit_price_ping) as priced_records')
             ->selectRaw('ROUND(AVG(unit_price_ping)) as avg_unit_price_ping')
             ->selectRaw('ROUND(AVG(total_price)) as avg_total_price')
-            ->groupBy('month')
-            ->orderBy('month')
+            ->groupBy('transaction_month')
+            ->orderBy('transaction_month')
             ->get()
             ->keyBy('month');
 
@@ -96,7 +113,7 @@ class TransactionController extends Controller
             return collect();
         }
 
-        return $this->fillMonths($volume, $this->medianByMonth($base, $month));
+        return $this->fillMonths($volume, $this->medianByMonth($base));
     }
 
     /**
@@ -105,14 +122,16 @@ class TransactionController extends Controller
      *
      * @return Collection<string, object>
      */
-    private function medianByMonth(Builder $base, string $month): Collection
+    private function medianByMonth(Builder $base): Collection
     {
+        // The (transaction_month, unit_price_ping) index already holds the rows
+        // in the partition order the window needs, so nothing has to be sorted.
         $ranked = (clone $base)
             ->whereNotNull('unit_price_ping')
-            ->selectRaw("{$month} as month")
-            ->selectRaw('unit_price_ping')
-            ->selectRaw("ROW_NUMBER() OVER (PARTITION BY {$month} ORDER BY unit_price_ping) as rn")
-            ->selectRaw("COUNT(*) OVER (PARTITION BY {$month}) as cnt");
+            ->select('transaction_month as month')
+            ->addSelect('unit_price_ping')
+            ->selectRaw('ROW_NUMBER() OVER (PARTITION BY transaction_month ORDER BY unit_price_ping) as rn')
+            ->selectRaw('COUNT(*) OVER (PARTITION BY transaction_month) as cnt');
 
         return DB::query()
             ->fromSub($ranked, 'ranked')
@@ -130,6 +149,11 @@ class TransactionController extends Controller
      * MySQL returns a decimal, and PHP's bundled SQLite has no FLOOR() to lean
      * on, so each driver gets the form that works there.
      */
+    private function trendMonths(): int
+    {
+        return max(1, (int) config('real_estate.trend_months', 60));
+    }
+
     private function halveRounded(string $expression): string
     {
         return match (DB::connection()->getDriverName()) {
@@ -154,7 +178,7 @@ class TransactionController extends Controller
         // Anchor the window to the newest month, not the oldest: one row with a
         // mistyped year would otherwise consume the whole cap and push every
         // real month out of the series.
-        $earliest = (clone $end)->subMonths(self::MAX_TREND_MONTHS - 1);
+        $earliest = (clone $end)->subMonths($this->trendMonths() - 1);
 
         if ($cursor < $earliest) {
             $cursor = $earliest;
@@ -179,19 +203,6 @@ class TransactionController extends Controller
         }
 
         return $months;
-    }
-
-    /**
-     * No portable SQL for "year and month", so pick per driver.
-     */
-    private function monthExpression(): string
-    {
-        return match (DB::connection()->getDriverName()) {
-            'sqlite' => "strftime('%Y-%m', transaction_date)",
-            'pgsql' => "to_char(transaction_date, 'YYYY-MM')",
-            'sqlsrv' => "FORMAT(transaction_date, 'yyyy-MM')",
-            default => "DATE_FORMAT(transaction_date, '%Y-%m')",
-        };
     }
 
     /**
@@ -295,7 +306,28 @@ class TransactionController extends Controller
             ->selectRaw('MAX(unit_price_ping) as max_unit_price_ping')
             ->first();
 
-        $districts = (clone $query)
+        return [
+            'total_records' => (int) ($aggregate->total_records ?? 0),
+            'avg_total_price' => $this->roundNullable($aggregate->avg_total_price ?? null),
+            'avg_unit_price_ping' => $this->roundNullable($aggregate->avg_unit_price_ping ?? null),
+            'min_unit_price_ping' => $this->roundNullable($aggregate->min_unit_price_ping ?? null),
+            'max_unit_price_ping' => $this->roundNullable($aggregate->max_unit_price_ping ?? null),
+            'latest_transaction_date' => (clone $query)->max('transaction_date'),
+            'oldest_transaction_date' => (clone $query)->min('transaction_date'),
+        ];
+    }
+
+    /**
+     * Only the JSON summary shows this. The index page never rendered it, so
+     * computing it there spent a full grouped scan on a discarded result.
+     *
+     * @param array<string, mixed> $filters
+     * @return Collection<int, object>
+     */
+    private function districtBreakdown(array $filters): Collection
+    {
+        return RealEstateTransaction::query()
+            ->filtered($filters)
             ->select('city', 'district')
             ->selectRaw('COUNT(*) as total_records')
             ->selectRaw('ROUND(AVG(unit_price_ping)) as avg_unit_price_ping')
@@ -304,17 +336,6 @@ class TransactionController extends Controller
             ->orderByDesc('total_records')
             ->limit(12)
             ->get();
-
-        return [
-            'total_records' => (int) ($aggregate->total_records ?? 0),
-            'avg_total_price' => $this->roundNullable($aggregate->avg_total_price ?? null),
-            'avg_unit_price_ping' => $this->roundNullable($aggregate->avg_unit_price_ping ?? null),
-            'min_unit_price_ping' => $this->roundNullable($aggregate->min_unit_price_ping ?? null),
-            'max_unit_price_ping' => $this->roundNullable($aggregate->max_unit_price_ping ?? null),
-            'districts' => $districts,
-            'latest_transaction_date' => (clone $query)->max('transaction_date'),
-            'oldest_transaction_date' => (clone $query)->min('transaction_date'),
-        ];
     }
 
     private function roundNullable(mixed $value): ?int

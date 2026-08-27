@@ -16,6 +16,7 @@ class RealEstateTransaction extends Model
         'district',
         'address',
         'transaction_date',
+        'transaction_month',
         'transaction_date_raw',
         'building_type',
         'main_use',
@@ -50,6 +51,18 @@ class RealEstateTransaction extends Model
         'raw_payload' => 'array',
     ];
 
+    protected static function booted(): void
+    {
+        static::saving(function (self $transaction): void {
+            // transaction_month is denormalised from transaction_date so the
+            // aggregate indexes can cover their queries. Deriving it here means
+            // no write path can leave a row invisible to the trend or to a date
+            // filter by forgetting to set it. (The importer upserts through the
+            // query builder, which skips this, so it sets the column itself.)
+            $transaction->transaction_month = $transaction->transaction_date?->format('Y-m');
+        });
+    }
+
     /**
      * Columns refreshed when an import re-encounters a known row_hash.
      *
@@ -69,7 +82,10 @@ class RealEstateTransaction extends Model
             ->when($filters['building_type'] ?? null, fn (Builder $query, string $type) => $query->where('building_type', 'like', "%{$type}%"))
             ->when($filters['min_total_price'] ?? null, fn (Builder $query, int $price) => $query->where('total_price', '>=', $price))
             ->when($filters['max_total_price'] ?? null, fn (Builder $query, int $price) => $query->where('total_price', '<=', $price))
-            ->when($filters['date_from'] ?? null, fn (Builder $query, string $date) => $query->whereDate('transaction_date', '>=', $date))
-            ->when($filters['date_to'] ?? null, fn (Builder $query, string $date) => $query->whereDate('transaction_date', '<=', $date));
+            // Plain comparisons, not whereDate(): the column is a DATE, and
+            // wrapping it in date() makes its index unusable, which turned a
+            // date-range page into a full scan of every row.
+            ->when($filters['date_from'] ?? null, fn (Builder $query, string $date) => $query->where('transaction_date', '>=', $date))
+            ->when($filters['date_to'] ?? null, fn (Builder $query, string $date) => $query->where('transaction_date', '<=', $date));
     }
 }

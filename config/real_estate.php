@@ -24,6 +24,13 @@ return [
     'trend_min_sample' => 5,
 
     /*
+     * How many months of trend to aggregate and draw. Every month costs a
+     * grouped scan and a window-function partition, so this bounds the work as
+     * well as the chart width.
+     */
+    'trend_months' => 60,
+
+    /*
      * MOI splits the open data into one file per county, named by the county
      * letter code (a_lvr_land_a.csv -> 臺北市). The 鄉鎮市區 column only holds
      * the district, and district names repeat across counties (中正區 exists in
