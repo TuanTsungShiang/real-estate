@@ -1,0 +1,16 @@
+/vendor
+/.idea
+/.vscode
+/.env
+/storage/*.key
+/storage/app/real-estate
+/storage/framework/cache/data
+/storage/framework/sessions
+/storage/framework/views
+/storage/logs/*.log
+/bootstrap/cache/*.php
+/database/*.sqlite
+/.phpunit.result.cache
+/real-estate-mvp.zip
+/.phpunit.cache
+/storage/app/testing
